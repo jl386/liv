@@ -427,7 +427,8 @@ export class SignalChannel implements Channel {
         }
       }
     } else if (audioAttachment && !transcribeAudioFile) {
-      finalContent = '[Voice Message - install /add-voice-transcription to enable]';
+      finalContent =
+        '[Voice Message - install /add-voice-transcription to enable]';
     }
 
     // Handle image attachments (if skill installed)
@@ -541,7 +542,9 @@ export class SignalChannel implements Channel {
 
 registerChannel('signal', (opts: ChannelOpts) => {
   if (!SignalCli) {
-    logger.debug('Signal: signal-sdk not installed. Run /add-signal to set up.');
+    logger.debug(
+      'Signal: signal-sdk not installed. Run /add-signal to set up.',
+    );
     return null;
   }
   const { botPhone } = getSignalEnv();
