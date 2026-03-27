@@ -26,10 +26,17 @@ fi
 
 log "New commits detected: $LOCAL -> $REMOTE"
 
+# Check if package.json changed before pulling (to decide whether npm ci is needed)
+PKGJSON_CHANGED=$(git diff "$LOCAL" "origin/$BRANCH" --name-only | grep -c '^package\.json$' || true)
+
 git pull origin "$BRANCH" --ff-only --quiet >> "$LOG_FILE" 2>&1
 
-log "Running npm ci"
-npm ci --quiet >> "$LOG_FILE" 2>&1
+if [ "$PKGJSON_CHANGED" -gt 0 ]; then
+  log "package.json changed, running npm ci"
+  npm ci --quiet >> "$LOG_FILE" 2>&1
+else
+  log "package.json unchanged, skipping npm ci"
+fi
 
 log "Building"
 npm run build --quiet >> "$LOG_FILE" 2>&1
