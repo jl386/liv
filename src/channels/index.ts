@@ -13,5 +13,4 @@
 import './signal.js';
 
 // whatsapp
-import './whatsapp.js';
-
+// import './whatsapp.js';
