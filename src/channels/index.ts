@@ -9,5 +9,6 @@
 
 // telegram
 
-// whatsapp
-import './whatsapp.js';
+// signal
+import './signal.js';
+
