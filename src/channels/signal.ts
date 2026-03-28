@@ -307,11 +307,17 @@ export class SignalChannel implements Channel {
     const mapFile = path.join(process.cwd(), 'store', 'signal-uuid-map.json');
     try {
       if (fs.existsSync(mapFile)) {
-        const data = JSON.parse(fs.readFileSync(mapFile, 'utf-8')) as Record<string, string>;
+        const data = JSON.parse(fs.readFileSync(mapFile, 'utf-8')) as Record<
+          string,
+          string
+        >;
         for (const [uuid, number] of Object.entries(data)) {
           this.uuidToPhone.set(uuid, number);
         }
-        logger.info({ count: this.uuidToPhone.size }, 'Signal: UUID→phone loaded from map file');
+        logger.info(
+          { count: this.uuidToPhone.size },
+          'Signal: UUID→phone loaded from map file',
+        );
       }
     } catch (err) {
       logger.warn({ err }, 'Signal: failed to read signal-uuid-map.json');
@@ -333,10 +339,13 @@ export class SignalChannel implements Channel {
     if (phones.length > 0) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const result = await (this.signal as any).sendJsonRpcRequest('getUserStatus', {
-          account: this.botPhone,
-          recipients: phones,
-        });
+        const result = await (this.signal as any).sendJsonRpcRequest(
+          'getUserStatus',
+          {
+            account: this.botPhone,
+            recipients: phones,
+          },
+        );
         const statuses: unknown[] = Array.isArray(result) ? result : [];
         let newCount = 0;
         for (const s of statuses) {
@@ -350,14 +359,20 @@ export class SignalChannel implements Channel {
         }
         if (newCount > 0) {
           this.persistUuidMap(mapFile);
-          logger.info({ newCount }, 'Signal: UUID→phone cache updated via getUserStatus');
+          logger.info(
+            { newCount },
+            'Signal: UUID→phone cache updated via getUserStatus',
+          );
         }
       } catch (err) {
         logger.debug({ err }, 'Signal: getUserStatus failed');
       }
     }
 
-    logger.info({ total: this.uuidToPhone.size }, 'Signal: UUID→phone cache ready');
+    logger.info(
+      { total: this.uuidToPhone.size },
+      'Signal: UUID→phone cache ready',
+    );
   }
 
   /** Write the current uuidToPhone map to disk for persistence across restarts */
@@ -397,7 +412,8 @@ export class SignalChannel implements Channel {
     if (sourceUuid && sourceNumberRaw) {
       this.uuidToPhone.set(sourceUuid, sourceNumberRaw);
     }
-    const source = sourceNumberRaw || this.uuidToPhone.get(sourceUuid) || sourceUuid;
+    const source =
+      sourceNumberRaw || this.uuidToPhone.get(sourceUuid) || sourceUuid;
     const sourceName = (envelope.sourceName ?? source) as string;
     const timestamp = new Date(
       Number(envelope.timestamp) || Date.now(),
