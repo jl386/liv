@@ -167,6 +167,8 @@ export class SignalChannel implements Channel {
   private outgoingQueue: Array<{ phone: string; text: string }> = [];
   private flushing = false;
   private opts: ChannelOpts;
+  /** UUID → phone number cache, populated from listContacts on connect */
+  private uuidToPhone = new Map<string, string>();
 
   constructor(opts: ChannelOpts) {
     this.opts = opts;
@@ -197,6 +199,11 @@ export class SignalChannel implements Channel {
     logger.info(
       { botPhone: this.botPhone, userPhone: this.userPhone || '(none)' },
       'Signal: connected',
+    );
+
+    // Build UUID→phone cache so DMs with UUID-only sources can be routed
+    this.loadContacts().catch((err) =>
+      logger.warn({ err }, 'Signal: failed to load contacts on connect'),
     );
 
     // Flush any messages queued while disconnected
@@ -290,6 +297,83 @@ export class SignalChannel implements Channel {
   // ---------------------------------------------------------------------------
 
   /**
+   * Populate uuidToPhone cache from:
+   *   1. store/signal-uuid-map.json  (persistent, manually seeded or auto-saved)
+   *   2. getUserStatus for registered DM phones (resolves Signal UUIDs)
+   * New mappings seen at message time are written back to the JSON file.
+   */
+  private async loadContacts(): Promise<void> {
+    // 1. Load from persistent map file
+    const mapFile = path.join(process.cwd(), 'store', 'signal-uuid-map.json');
+    try {
+      if (fs.existsSync(mapFile)) {
+        const data = JSON.parse(fs.readFileSync(mapFile, 'utf-8')) as Record<string, string>;
+        for (const [uuid, number] of Object.entries(data)) {
+          this.uuidToPhone.set(uuid, number);
+        }
+        logger.info({ count: this.uuidToPhone.size }, 'Signal: UUID→phone loaded from map file');
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Signal: failed to read signal-uuid-map.json');
+    }
+
+    // 2. Supplement via getUserStatus for registered DM phones not yet in cache
+    const groups = this.opts.registeredGroups();
+    const phones: string[] = [];
+    for (const jid of Object.keys(groups)) {
+      if (!jid.startsWith(SIGNAL_PREFIX)) continue;
+      const phone = jidToPhone(jid);
+      if (!this.isGroupId(phone) && phone !== this.botPhone) {
+        // Only query if we don't already have this phone in the cache
+        const alreadyCached = [...this.uuidToPhone.values()].includes(phone);
+        if (!alreadyCached) phones.push(phone);
+      }
+    }
+
+    if (phones.length > 0) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = await (this.signal as any).sendJsonRpcRequest('getUserStatus', {
+          account: this.botPhone,
+          recipients: phones,
+        });
+        const statuses: unknown[] = Array.isArray(result) ? result : [];
+        let newCount = 0;
+        for (const s of statuses) {
+          const status = s as Record<string, unknown>;
+          const uuid = status.uuid as string | undefined;
+          const number = status.number as string | undefined;
+          if (uuid && number) {
+            this.uuidToPhone.set(uuid, number);
+            newCount++;
+          }
+        }
+        if (newCount > 0) {
+          this.persistUuidMap(mapFile);
+          logger.info({ newCount }, 'Signal: UUID→phone cache updated via getUserStatus');
+        }
+      } catch (err) {
+        logger.debug({ err }, 'Signal: getUserStatus failed');
+      }
+    }
+
+    logger.info({ total: this.uuidToPhone.size }, 'Signal: UUID→phone cache ready');
+  }
+
+  /** Write the current uuidToPhone map to disk for persistence across restarts */
+  private persistUuidMap(mapFile: string): void {
+    try {
+      const data: Record<string, string> = {};
+      for (const [uuid, phone] of this.uuidToPhone.entries()) {
+        data[uuid] = phone;
+      }
+      fs.writeFileSync(mapFile, JSON.stringify(data, null, 2));
+    } catch (err) {
+      logger.debug({ err }, 'Signal: failed to persist UUID map');
+    }
+  }
+
+  /**
    * Check if a raw ID (after stripping signal: prefix) is a Signal group ID.
    * Signal group IDs are base64-encoded and contain =, /, or non-leading +.
    */
@@ -306,8 +390,14 @@ export class SignalChannel implements Channel {
     const envelope = p?.envelope as Record<string, unknown> | undefined;
     if (!envelope) return;
 
-    // source may be a UUID (primary mode) or phone number (linked mode)
-    const source = (envelope.sourceNumber ?? envelope.source ?? '') as string;
+    // sourceNumber may be null in UUID-mode; resolve via cache when needed
+    const sourceUuid = (envelope.sourceUuid ?? envelope.source ?? '') as string;
+    const sourceNumberRaw = (envelope.sourceNumber ?? '') as string;
+    // Update cache whenever we see a phone number alongside a UUID
+    if (sourceUuid && sourceNumberRaw) {
+      this.uuidToPhone.set(sourceUuid, sourceNumberRaw);
+    }
+    const source = sourceNumberRaw || this.uuidToPhone.get(sourceUuid) || sourceUuid;
     const sourceName = (envelope.sourceName ?? source) as string;
     const timestamp = new Date(
       Number(envelope.timestamp) || Date.now(),
@@ -347,7 +437,10 @@ export class SignalChannel implements Channel {
       if (groupInfo?.groupId) {
         chatPhone = groupInfo.groupId as string;
       } else {
-        chatPhone = this.botPhone;
+        // Use the sender's phone as the chat JID so each DM contact gets
+        // their own registered group context rather than all DMs sharing
+        // the bot's own number.
+        chatPhone = source;
       }
       text = dataMsg.message as string | undefined;
       attachments = (dataMsg.attachments as unknown[]) ?? [];
