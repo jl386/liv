@@ -3,6 +3,7 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
+import { processApplePimRequest } from './apple-pim.js';
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
@@ -144,6 +145,68 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process Apple PIM requests (main group only)
+      if (isMain) {
+        const requestsDir = path.join(ipcBaseDir, sourceGroup, 'requests');
+        const responsesDir = path.join(ipcBaseDir, sourceGroup, 'responses');
+        try {
+          if (fs.existsSync(requestsDir)) {
+            const requestFiles = fs
+              .readdirSync(requestsDir)
+              .filter((f) => f.endsWith('.json'));
+            for (const file of requestFiles) {
+              const filePath = path.join(requestsDir, file);
+              try {
+                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+                fs.unlinkSync(filePath);
+                const response = await processApplePimRequest(data);
+                // Write response for the container to read
+                fs.mkdirSync(responsesDir, { recursive: true });
+                const tempPath = path.join(responsesDir, `${data.id}.json.tmp`);
+                const responsePath = path.join(responsesDir, `${data.id}.json`);
+                fs.writeFileSync(tempPath, JSON.stringify(response));
+                fs.renameSync(tempPath, responsePath);
+                logger.debug(
+                  {
+                    requestId: data.id,
+                    domain: data.domain,
+                    action: data.action,
+                  },
+                  'Apple PIM request processed',
+                );
+              } catch (err) {
+                logger.error(
+                  { file, sourceGroup, err },
+                  'Error processing Apple PIM request',
+                );
+                // Try to write an error response so the container doesn't hang
+                try {
+                  const data = JSON.parse(
+                    fs.readFileSync(filePath, 'utf-8').toString(),
+                  );
+                  const errResp = {
+                    id: data.id,
+                    success: false,
+                    error: 'Host processing error',
+                  };
+                  fs.writeFileSync(
+                    path.join(responsesDir, `${data.id}.json`),
+                    JSON.stringify(errResp),
+                  );
+                } catch {
+                  // Request file already deleted or unreadable
+                }
+              }
+            }
+          }
+        } catch (err) {
+          logger.error(
+            { err, sourceGroup },
+            'Error reading Apple PIM requests directory',
+          );
+        }
       }
     }
 

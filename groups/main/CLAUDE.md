@@ -305,3 +305,25 @@ If a user wants tasks running more than ~2x daily and a script can't reduce agen
 - Suggest restructuring with a script that checks the condition first
 - If the user needs an LLM to evaluate data, suggest using an API key with direct Anthropic API calls inside the script
 - Help the user find the minimum viable frequency
+
+---
+
+## Apple PIM (Calendar, Notes, Reminders)
+
+You have MCP tools for managing iCloud calendars, notes, and reminders through the assistant's own iCloud account. Items are shared between the user and assistant via Apple's native iCloud sharing.
+
+### Available tools
+
+**Calendar:** `calendar_list`, `calendar_events`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`
+
+**Notes:** `notes_list_folders`, `notes_list`, `notes_read`, `notes_create`, `notes_update`
+
+**Reminders:** `reminders_list_lists`, `reminders_list`, `reminders_create`, `reminders_update`
+
+### Key points
+
+- Always discover available calendars/folders/lists first before operating on them
+- Dates are local time in ISO format (no `Z` suffix)
+- Event UIDs and note/reminder IDs come from list/query operations
+- These tools work via IPC request/response — expect ~1-2 second latency per call
+- Only available in the main group

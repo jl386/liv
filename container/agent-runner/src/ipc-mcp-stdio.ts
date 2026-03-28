@@ -14,6 +14,8 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const REQUESTS_DIR = path.join(IPC_DIR, 'requests');
+const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
@@ -336,6 +338,293 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     };
   },
 );
+
+// ---------------------------------------------------------------------------
+// Apple PIM: request/response helpers (main group only)
+// ---------------------------------------------------------------------------
+
+const PIM_RESPONSE_POLL_MS = 200;
+const PIM_RESPONSE_TIMEOUT_MS = 20_000;
+
+function sendPimRequest(
+  domain: string,
+  action: string,
+  params: Record<string, unknown>,
+): Promise<{ success: boolean; data?: unknown; error?: string }> {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const request = { id, domain, action, params };
+
+  fs.mkdirSync(REQUESTS_DIR, { recursive: true });
+  const tempPath = path.join(REQUESTS_DIR, `${id}.json.tmp`);
+  const requestPath = path.join(REQUESTS_DIR, `${id}.json`);
+  fs.writeFileSync(tempPath, JSON.stringify(request));
+  fs.renameSync(tempPath, requestPath);
+
+  // Poll for response
+  return new Promise((resolve) => {
+    const responsePath = path.join(RESPONSES_DIR, `${id}.json`);
+    const start = Date.now();
+
+    const poll = () => {
+      if (fs.existsSync(responsePath)) {
+        try {
+          const data = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+          fs.unlinkSync(responsePath);
+          resolve(data);
+        } catch {
+          resolve({ success: false, error: 'Failed to parse response' });
+        }
+        return;
+      }
+      if (Date.now() - start > PIM_RESPONSE_TIMEOUT_MS) {
+        resolve({ success: false, error: 'Request timed out waiting for host response' });
+        return;
+      }
+      setTimeout(poll, PIM_RESPONSE_POLL_MS);
+    };
+    poll();
+  });
+}
+
+function pimResult(resp: { success: boolean; data?: unknown; error?: string }) {
+  if (resp.success) {
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(resp.data, null, 2) }],
+    };
+  }
+  return {
+    content: [{ type: 'text' as const, text: `Error: ${resp.error}` }],
+    isError: true,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Calendar tools
+// ---------------------------------------------------------------------------
+
+if (isMain) {
+  server.tool(
+    'calendar_list',
+    "List all calendars available on the assistant's iCloud account.",
+    {},
+    async () => pimResult(await sendPimRequest('calendar', 'list', {})),
+  );
+
+  server.tool(
+    'calendar_events',
+    'Query calendar events within a date range.',
+    {
+      calendar_name: z.string().describe('Name of the calendar'),
+      start_date: z.string().describe('Start date in ISO format (e.g., "2026-03-27T00:00:00")'),
+      end_date: z.string().describe('End date in ISO format (e.g., "2026-03-28T00:00:00")'),
+    },
+    async (args) => pimResult(await sendPimRequest('calendar', 'events', {
+      calendarName: args.calendar_name,
+      startDate: args.start_date,
+      endDate: args.end_date,
+    })),
+  );
+
+  server.tool(
+    'calendar_create_event',
+    'Create a new calendar event.',
+    {
+      calendar_name: z.string().describe('Name of the calendar to add the event to'),
+      summary: z.string().describe('Event title/summary'),
+      start_date: z.string().describe('Start date in ISO format'),
+      end_date: z.string().describe('End date in ISO format'),
+      location: z.string().optional().describe('Event location'),
+      description: z.string().optional().describe('Event description/notes'),
+      all_day: z.boolean().optional().describe('Whether this is an all-day event'),
+    },
+    async (args) => pimResult(await sendPimRequest('calendar', 'create_event', {
+      calendarName: args.calendar_name,
+      summary: args.summary,
+      startDate: args.start_date,
+      endDate: args.end_date,
+      location: args.location,
+      description: args.description,
+      allDay: args.all_day,
+    })),
+  );
+
+  server.tool(
+    'calendar_update_event',
+    'Update an existing calendar event. Only provided fields are changed.',
+    {
+      calendar_name: z.string().describe('Name of the calendar containing the event'),
+      event_uid: z.string().describe('UID of the event to update (from calendar_events)'),
+      summary: z.string().optional().describe('New event title'),
+      start_date: z.string().optional().describe('New start date in ISO format'),
+      end_date: z.string().optional().describe('New end date in ISO format'),
+      location: z.string().optional().describe('New location (empty string to clear)'),
+      description: z.string().optional().describe('New description (empty string to clear)'),
+    },
+    async (args) => {
+      const updates: Record<string, unknown> = {};
+      if (args.summary !== undefined) updates.summary = args.summary;
+      if (args.start_date !== undefined) updates.startDate = args.start_date;
+      if (args.end_date !== undefined) updates.endDate = args.end_date;
+      if (args.location !== undefined) updates.location = args.location;
+      if (args.description !== undefined) updates.description = args.description;
+      return pimResult(await sendPimRequest('calendar', 'update_event', {
+        calendarName: args.calendar_name,
+        eventUid: args.event_uid,
+        updates,
+      }));
+    },
+  );
+
+  server.tool(
+    'calendar_delete_event',
+    'Delete a calendar event.',
+    {
+      calendar_name: z.string().describe('Name of the calendar containing the event'),
+      event_uid: z.string().describe('UID of the event to delete (from calendar_events)'),
+    },
+    async (args) => pimResult(await sendPimRequest('calendar', 'delete_event', {
+      calendarName: args.calendar_name,
+      eventUid: args.event_uid,
+    })),
+  );
+
+  // ---------------------------------------------------------------------------
+  // Notes tools
+  // ---------------------------------------------------------------------------
+
+  server.tool(
+    'notes_list_folders',
+    "List all note folders in the assistant's iCloud account.",
+    {},
+    async () => pimResult(await sendPimRequest('notes', 'list_folders', {})),
+  );
+
+  server.tool(
+    'notes_list',
+    'List notes in a specific folder.',
+    {
+      folder_name: z.string().describe('Name of the notes folder'),
+    },
+    async (args) => pimResult(await sendPimRequest('notes', 'list_notes', {
+      folderName: args.folder_name,
+    })),
+  );
+
+  server.tool(
+    'notes_read',
+    'Read the full content of a note.',
+    {
+      note_id: z.string().describe('ID of the note (from notes_list)'),
+    },
+    async (args) => pimResult(await sendPimRequest('notes', 'read', {
+      noteId: args.note_id,
+    })),
+  );
+
+  server.tool(
+    'notes_create',
+    'Create a new note in a folder.',
+    {
+      folder_name: z.string().describe('Name of the folder to create the note in'),
+      title: z.string().describe('Note title'),
+      body: z.string().describe('Note body text'),
+    },
+    async (args) => pimResult(await sendPimRequest('notes', 'create', {
+      folderName: args.folder_name,
+      title: args.title,
+      body: args.body,
+    })),
+  );
+
+  server.tool(
+    'notes_update',
+    'Update an existing note. Only provided fields are changed.',
+    {
+      note_id: z.string().describe('ID of the note to update (from notes_list)'),
+      name: z.string().optional().describe('New note title'),
+      body: z.string().optional().describe('New note body (replaces entire body)'),
+    },
+    async (args) => {
+      const updates: Record<string, unknown> = {};
+      if (args.name !== undefined) updates.name = args.name;
+      if (args.body !== undefined) updates.body = args.body;
+      return pimResult(await sendPimRequest('notes', 'update', {
+        noteId: args.note_id,
+        updates,
+      }));
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // Reminders tools
+  // ---------------------------------------------------------------------------
+
+  server.tool(
+    'reminders_list_lists',
+    "List all reminder lists in the assistant's iCloud account.",
+    {},
+    async () => pimResult(await sendPimRequest('reminders', 'list_lists', {})),
+  );
+
+  server.tool(
+    'reminders_list',
+    'List reminders in a specific list.',
+    {
+      list_name: z.string().describe('Name of the reminder list'),
+      include_completed: z.boolean().optional().describe('Include completed reminders (default: false, shows only incomplete)'),
+    },
+    async (args) => pimResult(await sendPimRequest('reminders', 'list_reminders', {
+      listName: args.list_name,
+      includeCompleted: args.include_completed,
+    })),
+  );
+
+  server.tool(
+    'reminders_create',
+    'Create a new reminder.',
+    {
+      list_name: z.string().describe('Name of the reminder list to add to'),
+      name: z.string().describe('Reminder title'),
+      due_date: z.string().optional().describe('Due date in ISO format (e.g., "2026-03-28T09:00:00")'),
+      body: z.string().optional().describe('Reminder notes/body'),
+      priority: z.number().optional().describe('Priority: 0=none, 1=high, 5=medium, 9=low'),
+    },
+    async (args) => pimResult(await sendPimRequest('reminders', 'create', {
+      listName: args.list_name,
+      name: args.name,
+      dueDate: args.due_date,
+      body: args.body,
+      priority: args.priority,
+    })),
+  );
+
+  server.tool(
+    'reminders_update',
+    'Update an existing reminder. Use this to complete reminders too.',
+    {
+      list_name: z.string().describe('Name of the reminder list containing the reminder'),
+      reminder_id: z.string().describe('ID of the reminder to update (from reminders_list)'),
+      name: z.string().optional().describe('New reminder title'),
+      body: z.string().optional().describe('New reminder notes'),
+      completed: z.boolean().optional().describe('Set to true to mark as completed'),
+      due_date: z.string().optional().describe('New due date in ISO format'),
+      priority: z.number().optional().describe('New priority: 0=none, 1=high, 5=medium, 9=low'),
+    },
+    async (args) => {
+      const updates: Record<string, unknown> = {};
+      if (args.name !== undefined) updates.name = args.name;
+      if (args.body !== undefined) updates.body = args.body;
+      if (args.completed !== undefined) updates.completed = args.completed;
+      if (args.due_date !== undefined) updates.dueDate = args.due_date;
+      if (args.priority !== undefined) updates.priority = args.priority;
+      return pimResult(await sendPimRequest('reminders', 'update', {
+        listName: args.list_name,
+        reminderId: args.reminder_id,
+        updates,
+      }));
+    },
+  );
+}
 
 // Start the stdio transport
 const transport = new StdioServerTransport();
