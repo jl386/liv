@@ -30,6 +30,20 @@ import {
 } from '../types.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 
+// Optional: try to import transcription if the voice-transcription skill is installed
+let isVoiceMessage: ((msg: unknown) => boolean) | null = null;
+let transcribeAudioMessage:
+  | ((msg: unknown, sock: unknown) => Promise<string | null>)
+  | null = null;
+try {
+  const transcriptionPath = '../transcription.js';
+  const mod = await import(/* webpackIgnore: true */ transcriptionPath);
+  isVoiceMessage = mod.isVoiceMessage;
+  transcribeAudioMessage = mod.transcribeAudioMessage;
+} catch {
+  // voice-transcription skill not installed — voice messages won't be transcribed
+}
+
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export interface WhatsAppChannelOpts {
@@ -252,7 +266,35 @@ export class WhatsAppChannel implements Channel {
             }
 
             // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
-            if (!content) continue;
+            // but allow voice messages through for transcription
+            if (!content && !(isVoiceMessage && isVoiceMessage(msg))) continue;
+
+            // Transcribe voice messages (if skill installed)
+            let finalContent = content;
+            if (isVoiceMessage && transcribeAudioMessage && isVoiceMessage(msg)) {
+              try {
+                const transcript = await transcribeAudioMessage(msg, this.sock);
+                if (transcript) {
+                  finalContent = `[Voice: ${transcript}]`;
+                  logger.info(
+                    { chatJid, length: transcript.length },
+                    'Transcribed voice message',
+                  );
+                } else {
+                  finalContent = '[Voice Message - transcription unavailable]';
+                }
+              } catch (err) {
+                logger.error({ err }, 'Voice transcription error');
+                finalContent = '[Voice Message - transcription failed]';
+              }
+            } else if (
+              isVoiceMessage &&
+              !transcribeAudioMessage &&
+              isVoiceMessage(msg)
+            ) {
+              finalContent =
+                '[Voice Message - install /add-voice-transcription to enable]';
+            }
 
             const sender = msg.key.participant || msg.key.remoteJid || '';
             const senderName = msg.pushName || sender.split('@')[0];
@@ -271,7 +313,7 @@ export class WhatsAppChannel implements Channel {
               chat_jid: chatJid,
               sender,
               sender_name: senderName,
-              content,
+              content: finalContent,
               timestamp,
               is_from_me: fromMe,
               is_bot_message: isBotMessage,
